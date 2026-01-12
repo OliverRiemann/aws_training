@@ -25,9 +25,9 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-RAW_PATH = args["RAW_PATH"]                  # e.g. s3://nyc-etl/raw/taxi/
-CURATED_PATH = args["CURATED_PATH"]          # e.g. s3://nyc-etl/curated/taxi/
-QUARANTINE_PATH = args["QUARANTINE_PATH"]    # e.g. s3://nyc-etl/quarantine/taxi/
+RAW_PATH = args["s3://nyc-etl/raw"]                  # e.g. s3://nyc-etl/raw/taxi/
+CURATED_PATH = args["https://nyc-etl.s3.us-east-2.amazonaws.com/curated"]          # e.g. s3://nyc-etl/curated/taxi/
+QUARANTINE_PATH = args["https://nyc-etl.s3.us-east-2.amazonaws.com/quarantine"]    # e.g. s3://nyc-etl/quarantine/taxi/
 
 # -----------------------------
 # 1) Define schema (enforcement)
