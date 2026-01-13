@@ -6,6 +6,8 @@ spark = SparkSession.builder.appName("nyc-local").master("local[*]").getOrCreate
 
 def run(spark, raw_path, curated_path, quarantine_path):
     raw = spark.read.parquet(raw_path)
+    raw = raw.withColumn("source_file", F.input_file_name())
+    raw.printSchema()
 
     df = (
         raw.withColumn("pickup_ts", F.col("tpep_pickup_datetime").cast("timestamp"))
@@ -17,6 +19,12 @@ def run(spark, raw_path, curated_path, quarantine_path):
         .withColumn("year", F.year("pickup_ts"))
         .withColumn("month", F.month("pickup_ts"))
     )
+
+    df.select(
+        F.min("pickup_ts").alias("min_ts"), F.max("pickup_ts").alias("max_ts")
+    ).show(truncate=False)
+
+    df.groupBy("year", "month").count().orderBy("year", "month").show(50)
 
     required_ok = (
         F.col("pickup_ts").isNotNull()
@@ -35,9 +43,42 @@ def run(spark, raw_path, curated_path, quarantine_path):
     good = df.filter(is_good)
     bad = df.filter(~is_good)
 
-    good.write.mode("overwrite").partitionBy("year", "month").parquet(curated_path)
+    good.repartition(8, "year", "month").write.mode("overwrite").partitionBy(
+        "year", "month"
+    ).parquet(curated_path)
 
-    bad.write.mode("overwrite").parquet(quarantine_path)
+    bad = df.filter(~is_good).withColumn(
+        "dq_reason",
+        F.when(F.col("pickup_ts").isNull(), F.lit("missing_pickup_ts"))
+        .when(F.col("dropoff_ts").isNull(), F.lit("missing_dropoff_ts"))
+        .when(F.col("total_amount").isNull(), F.lit("missing_total_amount"))
+        .when(F.col("total_amount") < 0, F.lit("negative_total_amount"))
+        .otherwise(F.lit("failed_other_rules")),
+    )
+
+    (
+        bad.select(
+            "source_file",
+            "dq_reason",
+            "tpep_pickup_datetime",
+            "tpep_dropoff_datetime",
+            "total_amount",
+        )
+        .write.mode("overwrite")
+        .parquet(quarantine_path)
+    )
+
+    metrics = df.agg(
+        F.count("*").alias("rows_total"),
+        F.sum(F.when(is_good, 1).otherwise(0)).alias("rows_good"),
+        F.sum(F.when(~is_good, 1).otherwise(0)).alias("rows_bad"),
+    )
+
+    (
+        metrics.withColumn("run_ts", F.current_timestamp())
+        .write.mode("append")
+        .parquet("data/metrics")
+    )
 
 
 run(
