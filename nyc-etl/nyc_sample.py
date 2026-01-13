@@ -19,12 +19,7 @@ def run(spark, raw_path, curated_path, quarantine_path):
         ]
     )
 
-    raw = (
-        spark.read.option("header", True)
-        .option("mode", "PERMISSIVE")  # don't fail entire read on bad rows
-        .schema(schema)  # enforce expected columns/types
-        .parquet(raw_path)
-    )
+    raw = spark.read.parquet(raw_path)
 
     df = (
         raw
