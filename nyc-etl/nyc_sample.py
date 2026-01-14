@@ -3,6 +3,8 @@ from pyspark.sql import functions as F
 
 spark = SparkSession.builder.appName("nyc-local").master("local[*]").getOrCreate()
 
+EXPECTED_YEAR = 2025
+
 
 def read_raw(spark, raw_path):
     raw_df = spark.read.parquet(raw_path).withColumn("source_file", F.input_file_name())
@@ -44,15 +46,25 @@ def data_quality(expected_year):
 def write_df(df, expected_year, curated_path, quarantine_path):
     is_good = data_quality(expected_year)
 
-    good = df.filter(is_good)
+    flagged = df.withColumn("is_good", is_good)
 
-    bad = df.filter(~is_good).withColumn(
-        "dq_reason",
-        F.when(F.col("pickup_ts").isNull(), F.lit("missing_pickup_ts"))
-        .when(F.col("dropoff_ts").isNull(), F.lit("missing_dropoff_ts"))
-        .when(F.col("total_amount").isNull(), F.lit("missing_total_amount"))
-        .when(F.col("total_amount") < 0, F.lit("negative_total_amount"))
-        .otherwise(F.lit("failed_other_rules")),
+    good = (
+        flagged.filter(F.col("is_good"))
+        .filter(F.col("year").isNotNull() & F.col("month").isNotNull())
+        .drop("is_good")
+    )
+
+    bad = (
+        flagged.filter(~F.col("is_good"))
+        .withColumn(
+            "dq_reason",
+            F.when(F.col("pickup_ts").isNull(), F.lit("missing_pickup_ts"))
+            .when(F.col("dropoff_ts").isNull(), F.lit("missing_dropoff_ts"))
+            .when(F.col("total_amount").isNull(), F.lit("missing_total_amount"))
+            .when(F.col("total_amount") < 0, F.lit("negative_total_amount"))
+            .otherwise(F.lit("failed_other_rules")),
+        )
+        .drop("is_good")
     )
 
     (
@@ -74,10 +86,10 @@ def write_df(df, expected_year, curated_path, quarantine_path):
         .parquet(quarantine_path)
     )
 
-    metrics = df.agg(
+    metrics = flagged.agg(
         F.count("*").alias("rows_total"),
-        F.sum(F.when(is_good, 1).otherwise(0)).alias("rows_good"),
-        F.sum(F.when(~is_good, 1).otherwise(0)).alias("rows_bad"),
+        F.sum(F.col("is_good").cast("int")).alias("rows_good"),
+        F.sum((~F.col("is_good")).cast("int")).alias("rows_bad"),
     )
 
     (
@@ -86,16 +98,25 @@ def write_df(df, expected_year, curated_path, quarantine_path):
         .parquet("data/metrics")
     )
 
+    flagged.unpersist()
 
-def run(spark, raw_path, curated_path, quarantine_path):
-    df.select(
-        F.min("pickup_ts").alias("min_ts"), F.max("pickup_ts").alias("max_ts")
-    ).show(truncate=False)
 
-    df.groupBy("year", "month").count().orderBy("year", "month").show(50)
+def run(
+    spark,
+    raw_path,
+    curated_path,
+    quarantine_path,
+    expected_year,
+):
+    raw = read_raw(spark, raw_path)
+    df = transform(raw)
 
-    good = df.filter(is_good)
-    bad = df.filter(~is_good)
+    write_df(
+        df=df,
+        expected_year=expected_year,
+        curated_path=curated_path,
+        quarantine_path=quarantine_path,
+    )
 
 
 run(
@@ -103,4 +124,5 @@ run(
     raw_path="raw",
     curated_path="data/curated",
     quarantine_path="data/quarantine",
+    expected_year=EXPECTED_YEAR,
 )
