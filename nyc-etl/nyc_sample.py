@@ -4,13 +4,14 @@ from pyspark.sql import functions as F
 spark = SparkSession.builder.appName("nyc-local").master("local[*]").getOrCreate()
 
 
-def run(spark, raw_path, curated_path, quarantine_path):
-    raw = spark.read.parquet(raw_path)
-    raw = raw.withColumn("source_file", F.input_file_name())
-    raw.printSchema()
+def read_raw(spark, raw_path):
+    raw_df = spark.read.parquet(raw_path).withColumn("source_file", F.input_file_name())
+    return raw_df
 
+
+def transform(raw_df):
     df = (
-        raw.withColumn("pickup_ts", F.col("tpep_pickup_datetime").cast("timestamp"))
+        raw_df.withColumn("pickup_ts", F.col("tpep_pickup_datetime").cast("timestamp"))
         .withColumn("dropoff_ts", F.col("tpep_dropoff_datetime").cast("timestamp"))
         .withColumn("passenger_count", F.col("passenger_count").cast("int"))
         .withColumn("trip_distance", F.col("trip_distance").cast("double"))
@@ -19,13 +20,10 @@ def run(spark, raw_path, curated_path, quarantine_path):
         .withColumn("year", F.year("pickup_ts"))
         .withColumn("month", F.month("pickup_ts"))
     )
+    return df
 
-    df.select(
-        F.min("pickup_ts").alias("min_ts"), F.max("pickup_ts").alias("max_ts")
-    ).show(truncate=False)
 
-    df.groupBy("year", "month").count().orderBy("year", "month").show(50)
-
+def data_quality(expected_year):
     required_ok = (
         F.col("pickup_ts").isNotNull()
         & F.col("dropoff_ts").isNotNull()
@@ -38,14 +36,15 @@ def run(spark, raw_path, curated_path, quarantine_path):
         & (F.col("passenger_count").isNull() | (F.col("passenger_count") >= 0))
     )
 
-    is_good = required_ok & business_rules_ok
+    in_scope = F.col("year") == expected_year
+
+    return required_ok & business_rules_ok & in_scope
+
+
+def write_df(df, expected_year, curated_path, quarantine_path):
+    is_good = data_quality(expected_year)
 
     good = df.filter(is_good)
-    bad = df.filter(~is_good)
-
-    good.repartition(8, "year", "month").write.mode("overwrite").partitionBy(
-        "year", "month"
-    ).parquet(curated_path)
 
     bad = df.filter(~is_good).withColumn(
         "dq_reason",
@@ -54,6 +53,13 @@ def run(spark, raw_path, curated_path, quarantine_path):
         .when(F.col("total_amount").isNull(), F.lit("missing_total_amount"))
         .when(F.col("total_amount") < 0, F.lit("negative_total_amount"))
         .otherwise(F.lit("failed_other_rules")),
+    )
+
+    (
+        good.repartition(8, "year", "month")
+        .write.mode("overwrite")
+        .partitionBy("year", "month")
+        .parquet(curated_path)
     )
 
     (
@@ -79,6 +85,17 @@ def run(spark, raw_path, curated_path, quarantine_path):
         .write.mode("append")
         .parquet("data/metrics")
     )
+
+
+def run(spark, raw_path, curated_path, quarantine_path):
+    df.select(
+        F.min("pickup_ts").alias("min_ts"), F.max("pickup_ts").alias("max_ts")
+    ).show(truncate=False)
+
+    df.groupBy("year", "month").count().orderBy("year", "month").show(50)
+
+    good = df.filter(is_good)
+    bad = df.filter(~is_good)
 
 
 run(
