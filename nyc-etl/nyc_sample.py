@@ -2,6 +2,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 spark = SparkSession.builder.appName("nyc-local").master("local[*]").getOrCreate()
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
 
 def read_raw(spark, raw_path):
@@ -65,7 +66,7 @@ def write_df(df, curated_path, quarantine_path):
 
     (
         good.repartition(8, "year", "month")
-        .write.mode("append")
+        .write.mode("overwrite")
         .partitionBy("year", "month")
         .parquet(curated_path)
     )
@@ -78,7 +79,7 @@ def write_df(df, curated_path, quarantine_path):
             "tpep_dropoff_datetime",
             "total_amount",
         )
-        .write.mode("append")
+        .write.mode("overwrite")
         .parquet(quarantine_path)
     )
 
@@ -148,3 +149,14 @@ run(
 spark.read.parquet("data/curated").groupBy("year", "month").count().orderBy(
     "year", "month"
 ).show()
+
+spark.read.parquet("raw").filter(F.input_file_name().contains("2025-09")).select(
+    F.count("*").alias("rows"),
+    F.sum(F.col("tpep_pickup_datetime").isNull().cast("int")).alias("null_pickup"),
+    F.sum(F.col("tpep_dropoff_datetime").isNull().cast("int")).alias("null_dropoff"),
+    F.sum(F.col("total_amount").isNull().cast("int")).alias("null_total"),
+).show()
+
+spark.read.parquet("data/quarantine").filter(
+    F.col("source_file").contains("2025-09")
+).groupBy("dq_reason").count().show(truncate=False)
